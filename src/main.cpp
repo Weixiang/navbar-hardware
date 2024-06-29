@@ -2,6 +2,9 @@
 #define EN_OTA false
 #define WiFiMAN true
 
+#define LED_PIN 5
+#define LED_COUNT 1
+
 #include <Arduino.h>
 #include "base64.hpp"
 
@@ -9,6 +12,8 @@
 #include <PubSubClient.h>
 #include <time.h>
 #include <ArduinoJson.h>
+
+#include <Adafruit_NeoPixel.h>
 
 #if EN_OTA
 #include <ArduinoOTA.h>
@@ -45,6 +50,17 @@ const int daylight_offset_sec = 0;         // Daylight saving time offset in sec
 // WiFi和MQTT客户端初始化
 BearSSL::WiFiClientSecure espClient;
 PubSubClient mqtt_client(espClient);
+
+Adafruit_NeoPixel strip(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
+
+// 闪烁相关变量
+bool isBlinking = false;
+uint32_t blinkColor = strip.Color(255, 0, 0);  // 默认红色
+unsigned long blinkInterval = 500;  // 默认500ms
+unsigned long blinkDuration = 5000; // 默认5秒
+unsigned long previousMillis = 0;
+unsigned long blinkStartMillis = 0;
+bool ledState = false;
 
 // MQTT 代理的 SSL 证书
 // Load DigiCert Global Root G2, which is used by EMQX Public Broker: broker.emqx.io
@@ -289,6 +305,50 @@ void otaSetup()
 }
 #endif
 
+// 非阻塞的闪烁控制函数
+void handleBlinking() {
+  if (isBlinking) {
+    unsigned long currentMillis = millis();
+
+    // 检查是否到了闪烁时长的终点
+    if (currentMillis - blinkStartMillis >= blinkDuration) {
+      isBlinking = false;
+      strip.setPixelColor(0, 0);  // 关闭LED
+      strip.show();
+      return;
+    }
+
+    // 检查是否到了切换LED状态的时间
+    if (currentMillis - previousMillis >= blinkInterval) {
+      previousMillis = currentMillis;
+
+      if (ledState) {
+        strip.setPixelColor(0, 0);  // 关闭LED
+      } else {
+        strip.setPixelColor(0, blinkColor);  // 设置LED颜色
+      }
+      ledState = !ledState;  // 切换LED状态
+      strip.show();
+    }
+  }
+}
+
+// 控制LED闪烁的函数
+void startBlinking(bool enable, uint32_t color = strip.Color(255, 0, 0), unsigned long interval = 500, unsigned long duration = 5000) {
+  isBlinking = enable;
+  if (enable) {
+    blinkColor = color;
+    blinkInterval = interval;
+    blinkDuration = duration;
+    previousMillis = millis();
+    blinkStartMillis = millis();
+    ledState = false;
+  } else {
+    strip.setPixelColor(0, 0);  // 关闭LED
+    strip.show();
+  }
+}
+
 void setup()
 {
   // put your setup code here, to run once:
@@ -304,9 +364,14 @@ void setup()
   mqtt_client.setCallback(mqttCallback);
   connectToMQTT();
 
+  strip.begin();
+  strip.show(); // 初始化灯珠状态
+
 #if EN_OTA
   otaSetup();
 #endif
+
+startBlinking(true, strip.Color(0, 255, 0), 300, 10000);
 }
 
 void loop()
@@ -317,6 +382,7 @@ void loop()
     connectToMQTT();
   }
   mqtt_client.loop();
+  handleBlinking();
 #if EN_OTA
   ArduinoOTA.handle();
 #endif
