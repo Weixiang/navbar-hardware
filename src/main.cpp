@@ -5,7 +5,11 @@
 #include <PubSubClient.h>
 #include <time.h>
 
+#include <ArduinoJson.h>
+
 #define BASE64 true // 设置为 true 启用 BASE64 解码，设置为 false 禁用
+
+const String rootTopic = "nav1044";
 
 // WiFi凭证
 const char *ssid = "Y1301";            // Replace with your WiFi name
@@ -20,7 +24,7 @@ const char *mqtt_topic = "nav1044/esp8266"; // MQTT topic
 
 // NTP 服务器设置
 const char *ntp_server = "ntp.aliyun.com"; // Default NTP server
-const long gmt_offset_sec = 0;             // GMT offset in seconds (adjust for your time zone)
+const long gmt_offset_sec = 8 * 3600;      // GMT offset in seconds (adjust for your time zone)
 const int daylight_offset_sec = 0;         // Daylight saving time offset in seconds
 
 // WiFi和MQTT客户端初始化
@@ -60,18 +64,10 @@ void connectToMQTT();
 void syncTime();
 void mqttCallback(char *topic, byte *payload, unsigned int length);
 void publishMQTT(const char *topic, const char *message);
+String get8601Time();
+String getSN();
 
-void setup()
-{
-  // put your setup code here, to run once:
-  Serial.begin(115200);
-  connectToWiFi();
-  syncTime(); // X.509 validation requires synchronization time
-  mqtt_client.setServer(mqtt_broker, mqtt_port);
-  mqtt_client.setCallback(mqttCallback);
-  connectToMQTT();
-}
-
+// 联网
 void connectToWiFi()
 {
   WiFi.begin(ssid, password);
@@ -81,8 +77,15 @@ void connectToWiFi()
     Serial.println("Connecting to WiFi...");
   }
   Serial.println("Connected to WiFi");
+  Serial.print("IP: ");
+  Serial.print(WiFi.localIP());
+  Serial.print("  MAC: ");
+  Serial.print(WiFi.macAddress());
+  Serial.print("  SN: ");
+  Serial.println(getSN());
 }
 
+// 同步时间
 void syncTime()
 {
   configTime(gmt_offset_sec, daylight_offset_sec, ntp_server);
@@ -105,22 +108,62 @@ void syncTime()
   }
 }
 
+// 格式化时间
+String get8601Time()
+{
+  time_t now;
+  struct tm timeinfo;
+  char buffer[64];
+
+  time(&now);
+  localtime_r(&now, &timeinfo);
+  strftime(buffer, sizeof(buffer), "%Y-%m-%dT%H:%M:%S%z", &timeinfo);
+
+  // 添加冒号到时区偏移
+  String formattedTime = buffer;
+  formattedTime = formattedTime.substring(0, formattedTime.length() - 2) + ":" + formattedTime.substring(formattedTime.length() - 2);
+
+  return formattedTime;
+}
+
+String getSN()
+{
+  String macAddress = WiFi.macAddress();
+  macAddress.replace(":", "");
+  return macAddress;
+}
+
+// 连接到服务器
 void connectToMQTT()
 {
   BearSSL::X509List serverTrustedCA(ca_cert);
   espClient.setTrustAnchors(&serverTrustedCA);
   while (!mqtt_client.connected())
   {
-    String client_id = "esp8266-client-" + String(WiFi.macAddress());
+    String client_id = "esp8266-client-" + getSN();
     Serial.printf("Connecting to MQTT Broker as %s.....\n", client_id.c_str());
     // if (mqtt_client.connect(client_id.c_str(), mqtt_username, mqtt_password))
     if (mqtt_client.connect(client_id.c_str()))
     {
       Serial.println("Connected to MQTT broker");
-      mqtt_client.subscribe(mqtt_topic);
+      // mqtt_client.subscribe(mqtt_topic);
       // Publish message upon successful connection
-      mqtt_client.publish(mqtt_topic, "Hi EMQX I'm ESP8266 ^^");
-      publishMQTT(mqtt_topic, "Hi EMQX I'm ESP8266 ^^");
+      // mqtt_client.publish(mqtt_topic, "Hi EMQX I'm ESP8266 ^^");
+
+      String topicLed = rootTopic + "/led/" + getSN();
+      String topicBeep = rootTopic + "/beep/" + getSN();
+      String topicCall = rootTopic + "/call/" + getSN();
+
+      mqtt_client.subscribe(topicLed.c_str());
+      mqtt_client.subscribe(topicBeep.c_str());
+      mqtt_client.subscribe(topicCall.c_str());
+
+      // 创建JSON对象
+      JsonDocument doc;
+      doc["data"] = "Hi EMQX I'm ESP8266 ^^";
+      char buffer[256];
+      serializeJson(doc, buffer);
+      publishMQTT(mqtt_topic, buffer);
     }
     else
     {
@@ -135,40 +178,76 @@ void connectToMQTT()
   }
 }
 
+// 消息回调
 void mqttCallback(char *topic, byte *payload, unsigned int length)
 {
   Serial.print("Message received on topic: ");
   Serial.print(topic);
   Serial.print("]: ");
-  for (int i = 0; i < length; i++)
+  for (unsigned int i = 0; i < length; i++)
   {
     Serial.print((char)payload[i]);
   }
   Serial.println();
 
 #if BASE64
-  // Base64 解码
-  u8 output_buffer[128];
-  unsigned int output_length = decode_base64(payload, length, output_buffer);
-  output_buffer[output_length] = '\0'; // 确保解码后的字符串以 null 结尾
+  // 检查第一个字符是否是 '{'
+  if (payload[0] != '{')
+  {
+    // Base64 解码
+    u8 output_buffer[128];
+    unsigned int output_length = decode_base64(payload, length, output_buffer);
+    output_buffer[output_length] = '\0'; // 确保解码后的字符串以 null 结尾
 
-  // 打印解码后的消息内容
-  Serial.print("Decoded message: ");
-  Serial.println((char *)output_buffer);
+    // 打印解码后的消息内容
+    Serial.print("Base64 Decoded: ");
+    Serial.println((char *)output_buffer);
+  }
+  else
+  {
+    Serial.println("JSON, skipping Base64 decoding.");
+  }
 #endif
 }
 
+// 发布消息
 void publishMQTT(const char *topic, const char *message)
 {
+  JsonDocument doc;
+  DeserializationError error = deserializeJson(doc, message);
+  if (error)
+  {
+    Serial.print("Failed to parse JSON: ");
+    Serial.println(error.c_str());
+    return;
+  }
+  doc["timestamp"] = get8601Time();
+
+  char buffer[256];
+  serializeJson(doc, buffer);
 
 #if BASE64
   // Base64 编码
   char encoded_message[128];
-  encode_base64((const u8 *)message, strlen(message), (u8 *)encoded_message);
+  encode_base64((const u8 *)buffer, strlen(buffer), (u8 *)encoded_message);
   mqtt_client.publish(topic, encoded_message);
 #else
-  mqtt_client.publish(topic, message);
+  mqtt_client.publish(topic, buffer);
 #endif
+}
+
+void setup()
+{
+  // put your setup code here, to run once:
+  Serial.begin(115200);
+  connectToWiFi();
+
+  syncTime(); // X.509 validation requires synchronization time
+  Serial.println("Current ISO 8601 Time: " + get8601Time());
+
+  mqtt_client.setServer(mqtt_broker, mqtt_port);
+  mqtt_client.setCallback(mqttCallback);
+  connectToMQTT();
 }
 
 void loop()
