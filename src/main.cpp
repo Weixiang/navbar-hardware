@@ -5,9 +5,14 @@
 #include <PubSubClient.h>
 #include <time.h>
 
+#include <ArduinoOTA.h>
+#include <ESP8266mDNS.h>
+#include <WiFiUdp.h>
+
 #include <ArduinoJson.h>
 
 #define BASE64 true // 设置为 true 启用 BASE64 解码，设置为 false 禁用
+#define EN_OTA true
 
 const String rootTopic = "nav1044";
 
@@ -66,15 +71,25 @@ void mqttCallback(char *topic, byte *payload, unsigned int length);
 void publishMQTT(const char *topic, const char *message);
 String get8601Time();
 String getSN();
+void otaSetup();
 
 // 联网
 void connectToWiFi()
 {
+  WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
+  unsigned long startAttemptTime = millis();
   while (WiFi.status() != WL_CONNECTED)
   {
     delay(1000);
     Serial.println("Connecting to WiFi...");
+
+    // 如果超过30秒仍未连接，执行ESP.restart()
+    if (millis() - startAttemptTime >= 30000)
+    {
+      Serial.println("Failed to connect to WiFi in 30 seconds. Restarting...");
+      ESP.restart();
+    }
   }
   Serial.println("Connected to WiFi");
   Serial.print("IP: ");
@@ -236,10 +251,32 @@ void publishMQTT(const char *topic, const char *message)
 #endif
 }
 
+#if EN_OTA
+void otaSetup()
+{
+  ArduinoOTA.onStart([]()
+                     { Serial.println("Start"); });
+  ArduinoOTA.onEnd([]()
+                   { Serial.println("\nEnd"); });
+  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total)
+                        { Serial.printf("Progress: %u%%\r", (progress / (total / 100))); });
+  ArduinoOTA.onError([](ota_error_t error)
+                     {
+    Serial.printf("Error[%u]: ", error);
+    if (error == OTA_AUTH_ERROR) Serial.println("Auth Failed");
+    else if (error == OTA_BEGIN_ERROR) Serial.println("Begin Failed");
+    else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
+    else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
+    else if (error == OTA_END_ERROR) Serial.println("End Failed"); });
+  ArduinoOTA.begin();
+}
+#endif
+
 void setup()
 {
   // put your setup code here, to run once:
   Serial.begin(115200);
+  Serial.println("Booting");
   connectToWiFi();
 
   syncTime(); // X.509 validation requires synchronization time
@@ -248,6 +285,10 @@ void setup()
   mqtt_client.setServer(mqtt_broker, mqtt_port);
   mqtt_client.setCallback(mqttCallback);
   connectToMQTT();
+
+#if EN_OTA
+  otaSetup();
+#endif
 }
 
 void loop()
@@ -258,4 +299,7 @@ void loop()
     connectToMQTT();
   }
   mqtt_client.loop();
+#if EN_OTA
+  ArduinoOTA.handle();
+#endif
 }
