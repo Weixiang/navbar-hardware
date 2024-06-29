@@ -1,24 +1,34 @@
+#define BASE64 false
+#define EN_OTA false
+#define WiFiMAN true
+
 #include <Arduino.h>
 #include "base64.hpp"
 
 #include <ESP8266WiFi.h>
 #include <PubSubClient.h>
 #include <time.h>
+#include <ArduinoJson.h>
 
+#if EN_OTA
 #include <ArduinoOTA.h>
 #include <ESP8266mDNS.h>
 #include <WiFiUdp.h>
+#endif
 
-#include <ArduinoJson.h>
-
-#define BASE64 true // 设置为 true 启用 BASE64 解码，设置为 false 禁用
-#define EN_OTA true
+#if WiFiMAN
+#include <DNSServer.h>
+#include <ESP8266WebServer.h>
+#include <WiFiManager.h>
+#endif
 
 const String rootTopic = "nav1044";
 
+#if !WiFiMAN
 // WiFi凭证
 const char *ssid = "Y1301";            // Replace with your WiFi name
 const char *password = "y13011301iot"; // Replace with your WiFi password
+#endif
 
 // MQTT 代理设置
 const int mqtt_port = 8883;                 // MQTT port (TLS)
@@ -76,6 +86,12 @@ void otaSetup();
 // 联网
 void connectToWiFi()
 {
+#if WiFiMAN
+  WiFiManager wifiManager;
+  // String ApName = "ESP-" + getSN();
+  // wifiManager.autoConnect(ApName.c_str());
+  wifiManager.autoConnect();
+#else
   WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
   unsigned long startAttemptTime = millis();
@@ -91,6 +107,7 @@ void connectToWiFi()
       ESP.restart();
     }
   }
+#endif
   Serial.println("Connected to WiFi");
   Serial.print("IP: ");
   Serial.print(WiFi.localIP());
@@ -277,6 +294,7 @@ void setup()
   // put your setup code here, to run once:
   Serial.begin(115200);
   Serial.println("Booting");
+
   connectToWiFi();
 
   syncTime(); // X.509 validation requires synchronization time
