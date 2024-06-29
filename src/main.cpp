@@ -55,12 +55,17 @@ Adafruit_NeoPixel strip(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
 
 // 闪烁相关变量
 bool isBlinking = false;
-uint32_t blinkColor = strip.Color(255, 0, 0);  // 默认红色
-unsigned long blinkInterval = 500;  // 默认500ms
-unsigned long blinkDuration = 5000; // 默认5秒
-unsigned long previousMillis = 0;
+uint32_t blinkColor = strip.Color(255, 0, 0); // 默认红色
+unsigned long blinkInterval = 500;            // 默认500ms
+unsigned long blinkDuration = 5000;           // 默认5秒
+unsigned long previousLedMillis = 0;
 unsigned long blinkStartMillis = 0;
 bool ledState = false;
+
+// 心跳包
+unsigned long previousPingMillis = 0;
+const long intervalPing = 60000; // 1分钟
+
 
 // MQTT 代理的 SSL 证书
 // Load DigiCert Global Root G2, which is used by EMQX Public Broker: broker.emqx.io
@@ -98,6 +103,15 @@ void publishMQTT(const char *topic, const char *message);
 String get8601Time();
 String getSN();
 void otaSetup();
+void handleBlinking();
+void startBlinking(bool enable, uint32_t color, unsigned long interval, unsigned long duration);
+void handlePing();
+
+const String topicLed = rootTopic + "/led/" + getSN();
+const String topicBeep = rootTopic + "/beep/" + getSN();
+const String topicCall = rootTopic + "/call/" + getSN();
+const String topicConfig = rootTopic + "/config/" + getSN();
+const String topicPing = rootTopic + "/ping/" + getSN();
 
 // 联网
 void connectToWiFi()
@@ -188,7 +202,7 @@ void connectToMQTT()
   espClient.setTrustAnchors(&serverTrustedCA);
   while (!mqtt_client.connected())
   {
-    String client_id = "esp8266-client-" + getSN();
+    String client_id = "ESP-" + getSN();
     Serial.printf("Connecting to MQTT Broker as %s.....\n", client_id.c_str());
     // if (mqtt_client.connect(client_id.c_str(), mqtt_username, mqtt_password))
     if (mqtt_client.connect(client_id.c_str()))
@@ -198,20 +212,26 @@ void connectToMQTT()
       // Publish message upon successful connection
       // mqtt_client.publish(mqtt_topic, "Hi EMQX I'm ESP8266 ^^");
 
-      String topicLed = rootTopic + "/led/" + getSN();
-      String topicBeep = rootTopic + "/beep/" + getSN();
-      String topicCall = rootTopic + "/call/" + getSN();
-
       mqtt_client.subscribe(topicLed.c_str());
       mqtt_client.subscribe(topicBeep.c_str());
       mqtt_client.subscribe(topicCall.c_str());
 
-      // 创建JSON对象
       JsonDocument doc;
-      doc["data"] = "Hi EMQX I'm ESP8266 ^^";
-      char buffer[256];
+      char buffer[256]; // 确保足够大以容纳序列化后的 JSON 数据
+
+      // 使用 String 对象存储 WiFi 相关信息，以确保数据有效性
+      String ipStr = WiFi.localIP().toString();
+      String macStr = WiFi.macAddress();
+
+      // 设置 JSON 文档的字段
+      doc["name"] = client_id;
+      doc["sn"] = getSN();
+      doc["ip"] = ipStr.c_str();
+      doc["mac"] = macStr.c_str();
+      // 进行 JSON 序列化
       serializeJson(doc, buffer);
-      publishMQTT(mqtt_topic, buffer);
+      // 发布 MQTT 消息
+      publishMQTT(topicConfig.c_str(), buffer);
     }
     else
     {
@@ -229,14 +249,17 @@ void connectToMQTT()
 // 消息回调
 void mqttCallback(char *topic, byte *payload, unsigned int length)
 {
+  String topicStr = String(topic);
+  String payloadStr = "";
+
   Serial.print("Message received on topic: ");
-  Serial.print(topic);
+  Serial.print(topicStr);
   Serial.print("]: ");
   for (unsigned int i = 0; i < length; i++)
   {
-    Serial.print((char)payload[i]);
+    payloadStr += (char)payload[i];
   }
-  Serial.println();
+  Serial.println(payloadStr);
 
 #if BASE64
   // 检查第一个字符是否是 '{'
@@ -247,15 +270,50 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
     unsigned int output_length = decode_base64(payload, length, output_buffer);
     output_buffer[output_length] = '\0'; // 确保解码后的字符串以 null 结尾
 
-    // 打印解码后的消息内容
+    // 将解码后的消息转换为 String 并打印
+    String payloadStr = String((char *)output_buffer);
     Serial.print("Base64 Decoded: ");
-    Serial.println((char *)output_buffer);
+    Serial.println(payloadStr);
   }
   else
   {
     Serial.println("JSON, skipping Base64 decoding.");
   }
 #endif
+
+  // String input;
+  JsonDocument doc;
+  DeserializationError error = deserializeJson(doc, payloadStr);
+  if (error)
+  {
+    Serial.print(F("deserializeJson() failed: "));
+    Serial.println(error.f_str());
+    return;
+  }
+  bool en = doc["en"];                // true
+  unsigned int delay = doc["delay"];  // 3
+  const char *sender = doc["sender"]; // "server"
+                                      // const char* timestamp = doc["timestamp"]; // "2024-06-29T23:04:09.699502+08:00"
+
+  // 比较 sender 是否等于 "server"
+  if (strcmp(sender, "server") != 0)
+  {
+    Serial.println("Sender is not server");
+    return;
+  }
+
+  if (topicStr == topicLed)
+  {
+    Serial.println("LED");
+  }
+  else if (topicStr == topicBeep)
+  {
+    Serial.println("Beep");
+  }
+  else if (topicStr == topicCall)
+  {
+    startBlinking(en, strip.Color(255, 255, 0), 500, delay * 1000);
+  }
 }
 
 // 发布消息
@@ -306,45 +364,56 @@ void otaSetup()
 #endif
 
 // 非阻塞的闪烁控制函数
-void handleBlinking() {
-  if (isBlinking) {
+void handleBlinking()
+{
+  if (isBlinking)
+  {
     unsigned long currentMillis = millis();
 
     // 检查是否到了闪烁时长的终点
-    if (currentMillis - blinkStartMillis >= blinkDuration) {
+    if (currentMillis - blinkStartMillis >= blinkDuration)
+    {
       isBlinking = false;
-      strip.setPixelColor(0, 0);  // 关闭LED
+      strip.setPixelColor(0, 0); // 关闭LED
       strip.show();
       return;
     }
 
     // 检查是否到了切换LED状态的时间
-    if (currentMillis - previousMillis >= blinkInterval) {
-      previousMillis = currentMillis;
+    if (currentMillis - previousLedMillis >= blinkInterval)
+    {
+      previousLedMillis = currentMillis;
 
-      if (ledState) {
-        strip.setPixelColor(0, 0);  // 关闭LED
-      } else {
-        strip.setPixelColor(0, blinkColor);  // 设置LED颜色
+      if (ledState)
+      {
+        strip.setPixelColor(0, 0); // 关闭LED
       }
-      ledState = !ledState;  // 切换LED状态
+      else
+      {
+        strip.setPixelColor(0, blinkColor); // 设置LED颜色
+      }
+      ledState = !ledState; // 切换LED状态
       strip.show();
     }
   }
 }
 
 // 控制LED闪烁的函数
-void startBlinking(bool enable, uint32_t color = strip.Color(255, 0, 0), unsigned long interval = 500, unsigned long duration = 5000) {
+void startBlinking(bool enable, uint32_t color, unsigned long interval, unsigned long duration)
+{
   isBlinking = enable;
-  if (enable) {
+  if (enable)
+  {
     blinkColor = color;
     blinkInterval = interval;
     blinkDuration = duration;
-    previousMillis = millis();
+    previousLedMillis = millis();
     blinkStartMillis = millis();
     ledState = false;
-  } else {
-    strip.setPixelColor(0, 0);  // 关闭LED
+  }
+  else
+  {
+    strip.setPixelColor(0, 0); // 关闭LED
     strip.show();
   }
 }
@@ -371,7 +440,16 @@ void setup()
   otaSetup();
 #endif
 
-startBlinking(true, strip.Color(0, 255, 0), 300, 10000);
+  startBlinking(true, strip.Color(0, 255, 0), 200, 3000);
+}
+
+void handlePing(){
+  unsigned long currentMillis = millis();
+  if (currentMillis - previousPingMillis >= intervalPing) {
+    previousPingMillis = currentMillis;
+    publishMQTT(topicPing.c_str(),"{\"msg\":\"ping\"}");
+    startBlinking(true, strip.Color(255, 0, 0), 200, 400);
+  }
 }
 
 void loop()
@@ -383,6 +461,7 @@ void loop()
   }
   mqtt_client.loop();
   handleBlinking();
+  handlePing();
 #if EN_OTA
   ArduinoOTA.handle();
 #endif
