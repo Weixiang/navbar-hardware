@@ -2,9 +2,17 @@
 #define EN_OTA false
 #define WiFiMAN true
 
-#define STATUSLED_PIN 2
+#define STATUSLED_PIN D4
 
 #define BUZZER_PIN D1
+
+// 定义引脚
+#define RST_PIN         D3          // RST 引脚
+#define SS_PIN          D8          // SDA 引脚
+
+#define SCK_PIN         D5          // SCK 引脚
+#define MOSI_PIN        D7          // MOSI 引脚
+#define MISO_PIN        D6          // MISO 引脚
 
 #include <Arduino.h>
 #include "base64.hpp"
@@ -13,6 +21,9 @@
 #include <PubSubClient.h>
 #include <time.h>
 #include <ArduinoJson.h>
+
+#include <SPI.h>
+#include <MFRC522.h>
 
 #if EN_OTA
 #include <ArduinoOTA.h>
@@ -37,7 +48,7 @@ Scheduler runner;
 void pingTask();
 void statusLED();
 Task t1(30 * 1000, TASK_FOREVER, &pingTask); // 每隔60000毫秒(1分钟)执行一次，永久运行
-Task t2(1000, TASK_FOREVER, &statusLED); // 指示灯
+Task t2(1000, TASK_FOREVER, &statusLED);     // 指示灯
 
 // ============================== 常量 ==============================
 
@@ -88,16 +99,25 @@ MrY=
 -----END CERTIFICATE-----
 )EOF";
 
-const char *call = "call:d=4,o=5,b=100:16d,16a,16d6";
 
 // ============================== 组件初始化 ==============================
 
 // WiFi和MQTT客户端初始化
 BearSSL::WiFiClientSecure espClient;
 PubSubClient mqtt_client(espClient);
+MFRC522 mfrc522(SS_PIN, RST_PIN); // 创建 MFRC522 对象
 
 // ============================== 任务变量 ==============================
 
+// 定义状态机的状态
+enum State
+{
+  IDLE,
+  CARD_PRESENT,
+  READ_CARD
+};
+
+State currentState = IDLE; // 当前状态
 
 // ============================== 函数声明 ==============================
 
@@ -110,6 +130,7 @@ String get8601Time();
 String getSN();
 void otaSetup();
 void autoConfig();
+void handleRfid();
 
 const String topicReader = rootTopic + "/reader/" + getSN();
 const String topicConfig = rootTopic + "/config/" + getSN();
@@ -375,9 +396,54 @@ void pingTask()
 
 void statusLED()
 {
-digitalWrite(STATUSLED_PIN, !digitalRead(STATUSLED_PIN));
+  digitalWrite(STATUSLED_PIN, !digitalRead(STATUSLED_PIN));
 }
 
+void handleRfid()
+{
+  switch (currentState)
+  {
+  case IDLE:
+    if (mfrc522.PICC_IsNewCardPresent())
+    {
+      currentState = CARD_PRESENT;
+    }
+    break;
+
+  case CARD_PRESENT:
+    if (mfrc522.PICC_ReadCardSerial())
+    {
+      currentState = READ_CARD;
+    }
+    else
+    {
+      currentState = IDLE;
+    }
+    break;
+
+  case READ_CARD:
+    // 打印卡片 UID
+    Serial.print("Card UID: ");
+    String cardID = "";
+    for (byte i = 0; i < mfrc522.uid.size; i++)
+    {
+      cardID += String(mfrc522.uid.uidByte[i] < 0x10 ? "0" : "");
+      cardID += String(mfrc522.uid.uidByte[i], HEX);
+    }
+    cardID.toUpperCase(); // 将卡号转换为大写
+    Serial.println(cardID);
+    String jsonString = "{\"rfid\":\"" + cardID + "\"}";
+
+    // 停止对这张卡的读取
+    mfrc522.PICC_HaltA();
+
+    publishMQTT(topicReader.c_str(), jsonString.c_str());
+
+    // 回到 IDLE 状态
+    currentState = IDLE;
+    break;
+  }
+}
 
 // ============================== 主函数 ==============================
 
@@ -399,6 +465,15 @@ void setup()
   mqtt_client.setCallback(mqttCallback);
   connectToMQTT();
 
+  // 设置 SPI 引脚
+  pinMode(SCK_PIN, FUNCTION_3);
+  pinMode(MOSI_PIN, FUNCTION_3);
+  pinMode(MISO_PIN, FUNCTION_3);
+  pinMode(SS_PIN, OUTPUT);
+
+  SPI.begin(); // 初始化 SPI 总线
+  mfrc522.PCD_Init(); // 初始化 MFRC522
+
 #if EN_OTA
   otaSetup();
 #endif
@@ -411,7 +486,6 @@ void setup()
   t2.enable();
 
   pinMode(BUZZER_PIN, OUTPUT);
-  
 }
 
 void loop()
@@ -423,6 +497,7 @@ void loop()
   }
   mqtt_client.loop();
   runner.execute();
+  handleRfid();
 #if EN_OTA
   ArduinoOTA.handle();
 #endif
