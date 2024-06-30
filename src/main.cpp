@@ -1,10 +1,21 @@
 #define BASE64 false
 #define EN_OTA false
 #define WiFiMAN true
+#define INTOROBOT true
 
+#if INTOROBOT
 #define LED_PIN 5
 #define LED_COUNT 1
+#else
+#define LED_PIN 12
+#define LED_COUNT 4
+#endif
+
 #define BUZZER_PIN 13
+#define ADCPIN A0
+#define DHTPIN 14
+
+#define DHTTYPE DHT22 // DHT 22  (AM2302), AM2321
 
 #include <Arduino.h>
 #include "base64.hpp"
@@ -16,6 +27,8 @@
 
 #include <Adafruit_NeoPixel.h>
 #include <NonBlockingRtttl.h>
+
+#include "DHT.h"
 
 #if EN_OTA
 #include <ArduinoOTA.h>
@@ -99,6 +112,8 @@ PubSubClient mqtt_client(espClient);
 
 Adafruit_NeoPixel strip(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
 
+DHT dht(DHTPIN, DHTTYPE);
+
 // ============================== 任务变量 ==============================
 
 // LED状态结构体
@@ -114,6 +129,12 @@ struct LEDState
 };
 LEDState ledState;
 
+struct DHTData
+{
+  double humidity;
+  double temperature;
+};
+
 // ============================== 函数声明 ==============================
 
 void connectToWiFi();
@@ -128,6 +149,16 @@ void autoConfig();
 
 void setLED(bool turnOn, unsigned long duration, uint32_t color, bool blink, unsigned long interval);
 void handleLED();
+
+double round2(double value);
+
+#if INTOROBOT
+double readADC();
+#else
+int readADC();
+#endif
+
+DHTData readDHT();
 
 const String topicLed = rootTopic + "/led/" + getSN();
 const String topicBeep = rootTopic + "/beep/" + getSN();
@@ -346,7 +377,7 @@ void publishMQTT(const char *topic, const char *message)
 
 #if BASE64
   // Base64 编码
-  char encoded_message[128];
+  char encoded_message[256];
   encode_base64((const u8 *)buffer, strlen(buffer), (u8 *)encoded_message);
   mqtt_client.publish(topic, encoded_message);
   Serial.print("MQTT send on [");
@@ -473,8 +504,91 @@ void handleLED()
 
 void pingTask()
 {
+
   publishMQTT(topicPing.c_str(), "{\"msg\":\"ping\"}");
   setLED(true, 200, strip.Color(255, 0, 0), false, 0);
+
+  char buffer[48];
+
+  DHTData dht = readDHT();
+#if INTOROBOT
+  double ls = readADC();
+#endif
+
+  JsonDocument doc;
+
+  doc["temp"] = round2(dht.temperature);
+  doc["humi"] = round2(dht.humidity);
+
+#if INTOROBOT
+  doc["light"] = round2(ls);
+#else
+  doc["light"] = readADC();
+#endif
+
+  serializeJson(doc, buffer);
+
+  publishMQTT(topicConfig.c_str(), buffer);
+  Serial.println("Sensor published.");
+}
+
+// ============================== ADC传感器 ==============================
+
+double round2(double value)
+{
+  return (int)(value * 100 + 0.5) / 100.0;
+}
+
+#if INTOROBOT
+
+double readADC()
+{
+  // 读取传感器的模拟值
+  int data = analogRead(ADCPIN);
+
+  // 计算照度值
+  double dpDoubleIllumination;
+  if (data == 0)
+  {
+    dpDoubleIllumination = 0.0;
+  }
+  else
+  {
+    dpDoubleIllumination = -2.712e-08 * data * data * data - 5.673e-05 * data * data + 1.788 * data + 122.1;
+  }
+
+  // 返回计算后的照度值
+  return dpDoubleIllumination;
+}
+
+#else
+
+int readADC()
+{
+  return analogRead(ADCPIN);
+}
+
+#endif
+
+// ============================== DHT传感器 ==============================
+
+DHTData readDHT()
+{
+  // Reading temperature or humidity takes about 250 milliseconds!
+  // Sensor readings may also be up to 2 seconds 'old' (its a very slow sensor)
+  double h = dht.readHumidity();
+  // Read temperature as Celsius (the default)
+  double t = dht.readTemperature();
+
+  // Check if any reads failed and exit early (to try again).
+  if (isnan(h) || isnan(t))
+  {
+    Serial.println(F("Failed to read from DHT sensor!"));
+    return {NAN, NAN};
+  }
+
+  DHTData data = {h, t};
+  return data;
 }
 
 // ============================== 主函数 ==============================
@@ -505,6 +619,8 @@ void setup()
 
   strip.begin();
   strip.show(); // 初始化灯珠状态
+
+  dht.begin();
 
   pinMode(BUZZER_PIN, OUTPUT);
   setLED(true, 500, strip.Color(0, 0, 255), false, 0);
