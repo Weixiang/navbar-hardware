@@ -11,6 +11,8 @@
 #define LED_COUNT 4
 #endif
 
+#define STATUSLED_PIN 2
+
 #define BUZZER_PIN 13
 #define ADCPIN A0
 #define DHTPIN 14
@@ -51,7 +53,9 @@ Scheduler runner;
 
 // 定义任务
 void pingTask();
+void statusLED();
 Task t1(30 * 1000, TASK_FOREVER, &pingTask); // 每隔60000毫秒(1分钟)执行一次，永久运行
+Task t2(1000, TASK_FOREVER, &statusLED); // 指示灯
 
 // ============================== 常量 ==============================
 
@@ -444,7 +448,6 @@ void autoConfig()
 
 // ============================== LED控制 ==============================
 
-// LED控制函数
 void setLED(bool turnOn, unsigned long duration, uint32_t color, bool blink, unsigned long interval)
 {
   ledState.isOn = turnOn;
@@ -457,12 +460,14 @@ void setLED(bool turnOn, unsigned long duration, uint32_t color, bool blink, uns
 
   if (!turnOn)
   {
-    strip.setPixelColor(0, 0);
+    for (int i = 0; i < LED_COUNT; i++)
+    {
+      strip.setPixelColor(i, 0);
+    }
     strip.show();
   }
 }
 
-// LED处理函数（在循环中调用）
 void handleLED()
 {
   unsigned long currentTime = millis();
@@ -471,7 +476,10 @@ void handleLED()
   if (ledState.isOn && ledState.onDuration > 0 && (currentTime - ledState.startTime >= ledState.onDuration))
   {
     ledState.isOn = false;
-    strip.setPixelColor(0, 0);
+    for (int i = 0; i < LED_COUNT; i++)
+    {
+      strip.setPixelColor(i, 0);
+    }
     strip.show();
     return;
   }
@@ -482,20 +490,26 @@ void handleLED()
     if (currentTime - ledState.lastChangeTime >= ledState.blinkInterval)
     {
       ledState.lastChangeTime = currentTime;
-      if (strip.getPixelColor(0) == 0)
+      for (int i = 0; i < LED_COUNT; i++)
       {
-        strip.setPixelColor(0, ledState.color);
-      }
-      else
-      {
-        strip.setPixelColor(0, 0);
+        if (strip.getPixelColor(i) == 0)
+        {
+          strip.setPixelColor(i, ledState.color);
+        }
+        else
+        {
+          strip.setPixelColor(i, 0);
+        }
       }
       strip.show();
     }
   }
   else if (ledState.isOn && !ledState.isBlinking)
   {
-    strip.setPixelColor(0, ledState.color);
+    for (int i = 0; i < LED_COUNT; i++)
+    {
+      strip.setPixelColor(i, ledState.color);
+    }
     strip.show();
   }
 }
@@ -530,6 +544,11 @@ void pingTask()
 
   publishMQTT(topicConfig.c_str(), buffer);
   Serial.println("Sensor published.");
+}
+
+void statusLED()
+{
+digitalWrite(STATUSLED_PIN, !digitalRead(STATUSLED_PIN));
 }
 
 // ============================== ADC传感器 ==============================
@@ -599,6 +618,9 @@ void setup()
   Serial.begin(115200);
   Serial.println("Booting");
 
+  pinMode(STATUSLED_PIN, OUTPUT);
+  digitalWrite(STATUSLED_PIN, LOW);
+
   connectToWiFi();
 
   syncTime(); // X.509 validation requires synchronization time
@@ -614,8 +636,10 @@ void setup()
 
   // 将任务添加到调度器
   runner.addTask(t1);
+  runner.addTask(t2);
   // 启动任务
   t1.enable();
+  t2.enable();
 
   strip.begin();
   strip.show(); // 初始化灯珠状态
@@ -623,6 +647,7 @@ void setup()
   dht.begin();
 
   pinMode(BUZZER_PIN, OUTPUT);
+  
   setLED(true, 500, strip.Color(0, 0, 255), false, 0);
 }
 
