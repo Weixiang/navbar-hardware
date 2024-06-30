@@ -7,12 +7,12 @@
 #define BUZZER_PIN D1
 
 // 定义引脚
-#define RST_PIN         D3          // RST 引脚
-#define SS_PIN          D8          // SDA 引脚
+#define RST_PIN D3 // RST 引脚
+#define SS_PIN D8  // SDA 引脚
 
-#define SCK_PIN         D5          // SCK 引脚
-#define MOSI_PIN        D7          // MOSI 引脚
-#define MISO_PIN        D6          // MISO 引脚
+#define SCK_PIN D5  // SCK 引脚
+#define MOSI_PIN D7 // MOSI 引脚
+#define MISO_PIN D6 // MISO 引脚
 
 #include <Arduino.h>
 #include "base64.hpp"
@@ -99,7 +99,6 @@ MrY=
 -----END CERTIFICATE-----
 )EOF";
 
-
 // ============================== 组件初始化 ==============================
 
 // WiFi和MQTT客户端初始化
@@ -119,6 +118,11 @@ enum State
 
 State currentState = IDLE; // 当前状态
 
+// 定义蜂鸣器相关变量
+bool buzzerActive = false;
+unsigned long buzzerStartTime = 0;
+unsigned long buzzerDuration = 0;
+
 // ============================== 函数声明 ==============================
 
 void connectToWiFi();
@@ -131,6 +135,8 @@ String getSN();
 void otaSetup();
 void autoConfig();
 void handleRfid();
+void handleBeep();
+void setBeep(bool state, unsigned long duration);
 
 const String topicReader = rootTopic + "/reader/" + getSN();
 const String topicConfig = rootTopic + "/config/" + getSN();
@@ -313,6 +319,7 @@ void publishMQTT(const char *topic, const char *message)
     Serial.println(error.c_str());
     return;
   }
+  doc["sender"] = getSN();
   doc["timestamp"] = get8601Time();
 
   char buffer[256];
@@ -433,6 +440,7 @@ void handleRfid()
     cardID.toUpperCase(); // 将卡号转换为大写
     Serial.println(cardID);
     String jsonString = "{\"rfid\":\"" + cardID + "\"}";
+    setBeep(true, 100);
 
     // 停止对这张卡的读取
     mfrc522.PICC_HaltA();
@@ -442,6 +450,31 @@ void handleRfid()
     // 回到 IDLE 状态
     currentState = IDLE;
     break;
+  }
+}
+
+// 蜂鸣器控制函数
+void setBeep(bool state, unsigned long duration = 0)
+{
+  if (state)
+  {
+    digitalWrite(BUZZER_PIN, HIGH); // 打开蜂鸣器
+    buzzerActive = true;
+    buzzerStartTime = millis(); // 记录蜂鸣器启动时间
+    buzzerDuration = duration;
+  }
+  else
+  {
+    digitalWrite(BUZZER_PIN, LOW); // 关闭蜂鸣器
+    buzzerActive = false;
+  }
+}
+
+void handleBeep()
+{
+  if (buzzerActive && (millis() - buzzerStartTime >= buzzerDuration))
+  {
+    setBeep(false); // 关闭蜂鸣器
   }
 }
 
@@ -471,8 +504,12 @@ void setup()
   pinMode(MISO_PIN, FUNCTION_3);
   pinMode(SS_PIN, OUTPUT);
 
-  SPI.begin(); // 初始化 SPI 总线
+  SPI.begin();        // 初始化 SPI 总线
   mfrc522.PCD_Init(); // 初始化 MFRC522
+
+  // 设置蜂鸣器引脚
+  pinMode(BUZZER_PIN, OUTPUT);
+  digitalWrite(BUZZER_PIN, LOW); // 初始状态为关闭
 
 #if EN_OTA
   otaSetup();
@@ -498,6 +535,7 @@ void loop()
   mqtt_client.loop();
   runner.execute();
   handleRfid();
+  handleBeep();
 #if EN_OTA
   ArduinoOTA.handle();
 #endif
