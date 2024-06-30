@@ -1,23 +1,10 @@
 #define BASE64 false
 #define EN_OTA false
 #define WiFiMAN true
-#define INTOROBOT true
-
-#if INTOROBOT
-#define LED_PIN 5
-#define LED_COUNT 1
-#else
-#define LED_PIN 12
-#define LED_COUNT 4
-#endif
 
 #define STATUSLED_PIN 2
 
-#define BUZZER_PIN 13
-#define ADCPIN A0
-#define DHTPIN 14
-
-#define DHTTYPE DHT22 // DHT 22  (AM2302), AM2321
+#define BUZZER_PIN D1
 
 #include <Arduino.h>
 #include "base64.hpp"
@@ -26,11 +13,6 @@
 #include <PubSubClient.h>
 #include <time.h>
 #include <ArduinoJson.h>
-
-#include <Adafruit_NeoPixel.h>
-#include <NonBlockingRtttl.h>
-
-#include "DHT.h"
 
 #if EN_OTA
 #include <ArduinoOTA.h>
@@ -114,30 +96,8 @@ const char *call = "call:d=4,o=5,b=100:16d,16a,16d6";
 BearSSL::WiFiClientSecure espClient;
 PubSubClient mqtt_client(espClient);
 
-Adafruit_NeoPixel strip(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
-
-DHT dht(DHTPIN, DHTTYPE);
-
 // ============================== 任务变量 ==============================
 
-// LED状态结构体
-struct LEDState
-{
-  bool isOn = false;                     // LED是否开启
-  uint32_t color = strip.Color(0, 0, 0); // 当前颜色
-  bool isBlinking = false;               // 是否闪烁
-  unsigned long blinkInterval = 500;     // 闪烁间隔时间（毫秒）
-  unsigned long onDuration = 0;          // 开启时长（毫秒），0表示无限长
-  unsigned long lastChangeTime = 0;      // 上次状态变化的时间戳
-  unsigned long startTime = 0;           // 开始时间戳
-};
-LEDState ledState;
-
-struct DHTData
-{
-  double humidity;
-  double temperature;
-};
 
 // ============================== 函数声明 ==============================
 
@@ -151,22 +111,7 @@ String getSN();
 void otaSetup();
 void autoConfig();
 
-void setLED(bool turnOn, unsigned long duration, uint32_t color, bool blink, unsigned long interval);
-void handleLED();
-
-double round2(double value);
-
-#if INTOROBOT
-double readADC();
-#else
-int readADC();
-#endif
-
-DHTData readDHT();
-
-const String topicLed = rootTopic + "/led/" + getSN();
-const String topicBeep = rootTopic + "/beep/" + getSN();
-const String topicCall = rootTopic + "/call/" + getSN();
+const String topicReader = rootTopic + "/reader/" + getSN();
 const String topicConfig = rootTopic + "/config/" + getSN();
 const String topicPing = rootTopic + "/ping/" + getSN();
 
@@ -275,11 +220,6 @@ void connectToMQTT()
       // mqtt_client.subscribe(mqtt_topic);
       // Publish message upon successful connection
       // mqtt_client.publish(mqtt_topic, "Hi EMQX I'm ESP8266 ^^");
-
-      mqtt_client.subscribe(topicLed.c_str());
-      mqtt_client.subscribe(topicBeep.c_str());
-      mqtt_client.subscribe(topicCall.c_str());
-
       autoConfig();
     }
   }
@@ -329,8 +269,7 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
     Serial.println(error.f_str());
     return;
   }
-  bool en = doc["en"];                // true
-  unsigned int delay = doc["delay"];  // 3
+
   const char *sender = doc["sender"]; // "server"
                                       // const char* timestamp = doc["timestamp"]; // "2024-06-29T23:04:09.699502+08:00"
 
@@ -339,27 +278,6 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
   {
     Serial.println("Sender is not server");
     return;
-  }
-
-  if (topicStr == topicLed)
-  {
-    Serial.println("LED");
-  }
-  else if (topicStr == topicBeep)
-  {
-    Serial.println("Beep");
-  }
-  else if (topicStr == topicCall)
-  {
-    if (!ledState.isOn)
-    {
-      setLED(en, delay * 1000, strip.Color(255, 255, 0), true, 200);
-    }
-
-    if (!rtttl::isPlaying())
-    {
-      rtttl::begin(BUZZER_PIN, call);
-    }
   }
 }
 
@@ -446,104 +364,13 @@ void autoConfig()
   // setLED(true, 500, strip.Color(0, 255, 0), false, 0);
 }
 
-// ============================== LED控制 ==============================
-
-void setLED(bool turnOn, unsigned long duration, uint32_t color, bool blink, unsigned long interval)
-{
-  ledState.isOn = turnOn;
-  ledState.onDuration = duration;
-  ledState.color = color;
-  ledState.isBlinking = blink;
-  ledState.blinkInterval = interval;
-  ledState.startTime = millis();
-  ledState.lastChangeTime = millis();
-
-  if (!turnOn)
-  {
-    for (int i = 0; i < LED_COUNT; i++)
-    {
-      strip.setPixelColor(i, 0);
-    }
-    strip.show();
-  }
-}
-
-void handleLED()
-{
-  unsigned long currentTime = millis();
-
-  // 检查LED是否应该关闭
-  if (ledState.isOn && ledState.onDuration > 0 && (currentTime - ledState.startTime >= ledState.onDuration))
-  {
-    ledState.isOn = false;
-    for (int i = 0; i < LED_COUNT; i++)
-    {
-      strip.setPixelColor(i, 0);
-    }
-    strip.show();
-    return;
-  }
-
-  // 处理闪烁逻辑
-  if (ledState.isOn && ledState.isBlinking)
-  {
-    if (currentTime - ledState.lastChangeTime >= ledState.blinkInterval)
-    {
-      ledState.lastChangeTime = currentTime;
-      for (int i = 0; i < LED_COUNT; i++)
-      {
-        if (strip.getPixelColor(i) == 0)
-        {
-          strip.setPixelColor(i, ledState.color);
-        }
-        else
-        {
-          strip.setPixelColor(i, 0);
-        }
-      }
-      strip.show();
-    }
-  }
-  else if (ledState.isOn && !ledState.isBlinking)
-  {
-    for (int i = 0; i < LED_COUNT; i++)
-    {
-      strip.setPixelColor(i, ledState.color);
-    }
-    strip.show();
-  }
-}
-
 // ============================== 心跳包 ==============================
 
 void pingTask()
 {
 
   publishMQTT(topicPing.c_str(), "{\"msg\":\"ping\"}");
-  setLED(true, 200, strip.Color(255, 0, 0), false, 0);
-
-  char buffer[48];
-
-  DHTData dht = readDHT();
-#if INTOROBOT
-  double ls = readADC();
-#endif
-
-  JsonDocument doc;
-
-  doc["temp"] = round2(dht.temperature);
-  doc["humi"] = round2(dht.humidity);
-
-#if INTOROBOT
-  doc["light"] = round2(ls);
-#else
-  doc["light"] = readADC();
-#endif
-
-  serializeJson(doc, buffer);
-
-  publishMQTT(topicConfig.c_str(), buffer);
-  Serial.println("Sensor published.");
+  Serial.println("Heartbeat published.");
 }
 
 void statusLED()
@@ -551,64 +378,6 @@ void statusLED()
 digitalWrite(STATUSLED_PIN, !digitalRead(STATUSLED_PIN));
 }
 
-// ============================== ADC传感器 ==============================
-
-double round2(double value)
-{
-  return (int)(value * 100 + 0.5) / 100.0;
-}
-
-#if INTOROBOT
-
-double readADC()
-{
-  // 读取传感器的模拟值
-  int data = analogRead(ADCPIN);
-
-  // 计算照度值
-  double dpDoubleIllumination;
-  if (data == 0)
-  {
-    dpDoubleIllumination = 0.0;
-  }
-  else
-  {
-    dpDoubleIllumination = -2.712e-08 * data * data * data - 5.673e-05 * data * data + 1.788 * data + 122.1;
-  }
-
-  // 返回计算后的照度值
-  return dpDoubleIllumination;
-}
-
-#else
-
-int readADC()
-{
-  return analogRead(ADCPIN);
-}
-
-#endif
-
-// ============================== DHT传感器 ==============================
-
-DHTData readDHT()
-{
-  // Reading temperature or humidity takes about 250 milliseconds!
-  // Sensor readings may also be up to 2 seconds 'old' (its a very slow sensor)
-  double h = dht.readHumidity();
-  // Read temperature as Celsius (the default)
-  double t = dht.readTemperature();
-
-  // Check if any reads failed and exit early (to try again).
-  if (isnan(h) || isnan(t))
-  {
-    Serial.println(F("Failed to read from DHT sensor!"));
-    return {NAN, NAN};
-  }
-
-  DHTData data = {h, t};
-  return data;
-}
 
 // ============================== 主函数 ==============================
 
@@ -641,14 +410,8 @@ void setup()
   t1.enable();
   t2.enable();
 
-  strip.begin();
-  strip.show(); // 初始化灯珠状态
-
-  dht.begin();
-
   pinMode(BUZZER_PIN, OUTPUT);
   
-  setLED(true, 500, strip.Color(0, 0, 255), false, 0);
 }
 
 void loop()
@@ -660,8 +423,6 @@ void loop()
   }
   mqtt_client.loop();
   runner.execute();
-  handleLED();
-  rtttl::play();
 #if EN_OTA
   ArduinoOTA.handle();
 #endif
