@@ -4,6 +4,7 @@
 
 #define LED_PIN 5
 #define LED_COUNT 1
+#define BUZZER_PIN 13
 
 #include <Arduino.h>
 #include "base64.hpp"
@@ -14,6 +15,7 @@
 #include <ArduinoJson.h>
 
 #include <Adafruit_NeoPixel.h>
+#include <NonBlockingRtttl.h>
 
 #if EN_OTA
 #include <ArduinoOTA.h>
@@ -87,6 +89,8 @@ MrY=
 -----END CERTIFICATE-----
 )EOF";
 
+const char *call = "call:d=4,o=5,b=100:16d,16a,16d6";
+
 // ============================== 组件初始化 ==============================
 
 // WiFi和MQTT客户端初始化
@@ -98,14 +102,15 @@ Adafruit_NeoPixel strip(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
 // ============================== 任务变量 ==============================
 
 // LED状态结构体
-struct LEDState {
-  bool isOn = false;           // LED是否开启
+struct LEDState
+{
+  bool isOn = false;                     // LED是否开启
   uint32_t color = strip.Color(0, 0, 0); // 当前颜色
-  bool isBlinking = false;     // 是否闪烁
-  unsigned long blinkInterval = 500; // 闪烁间隔时间（毫秒）
-  unsigned long onDuration = 0;      // 开启时长（毫秒），0表示无限长
-  unsigned long lastChangeTime = 0;  // 上次状态变化的时间戳
-  unsigned long startTime = 0;       // 开始时间戳
+  bool isBlinking = false;               // 是否闪烁
+  unsigned long blinkInterval = 500;     // 闪烁间隔时间（毫秒）
+  unsigned long onDuration = 0;          // 开启时长（毫秒），0表示无限长
+  unsigned long lastChangeTime = 0;      // 上次状态变化的时间戳
+  unsigned long startTime = 0;           // 开始时间戳
 };
 LEDState ledState;
 
@@ -311,7 +316,15 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
   }
   else if (topicStr == topicCall)
   {
-    setLED(en, delay * 1000, strip.Color(255, 255, 0), true, 200);
+    if (!ledState.isOn)
+    {
+      setLED(en, delay * 1000, strip.Color(255, 255, 0), true, 200);
+    }
+
+    if (!rtttl::isPlaying())
+    {
+      rtttl::begin(BUZZER_PIN, call);
+    }
   }
 }
 
@@ -395,13 +408,14 @@ void autoConfig()
   // 发布 MQTT 消息
   publishMQTT(topicConfig.c_str(), buffer);
   Serial.println("Auto config completed.");
-  setLED(true, 500, strip.Color(0, 255, 0), false, 0);
+  // setLED(true, 500, strip.Color(0, 255, 0), false, 0);
 }
 
 // ============================== LED控制 ==============================
 
 // LED控制函数
-void setLED(bool turnOn, unsigned long duration, uint32_t color, bool blink, unsigned long interval) {
+void setLED(bool turnOn, unsigned long duration, uint32_t color, bool blink, unsigned long interval)
+{
   ledState.isOn = turnOn;
   ledState.onDuration = duration;
   ledState.color = color;
@@ -410,18 +424,21 @@ void setLED(bool turnOn, unsigned long duration, uint32_t color, bool blink, uns
   ledState.startTime = millis();
   ledState.lastChangeTime = millis();
 
-  if (!turnOn) {
+  if (!turnOn)
+  {
     strip.setPixelColor(0, 0);
     strip.show();
   }
 }
 
 // LED处理函数（在循环中调用）
-void handleLED() {
+void handleLED()
+{
   unsigned long currentTime = millis();
 
   // 检查LED是否应该关闭
-  if (ledState.isOn && ledState.onDuration > 0 && (currentTime - ledState.startTime >= ledState.onDuration)) {
+  if (ledState.isOn && ledState.onDuration > 0 && (currentTime - ledState.startTime >= ledState.onDuration))
+  {
     ledState.isOn = false;
     strip.setPixelColor(0, 0);
     strip.show();
@@ -429,17 +446,24 @@ void handleLED() {
   }
 
   // 处理闪烁逻辑
-  if (ledState.isOn && ledState.isBlinking) {
-    if (currentTime - ledState.lastChangeTime >= ledState.blinkInterval) {
+  if (ledState.isOn && ledState.isBlinking)
+  {
+    if (currentTime - ledState.lastChangeTime >= ledState.blinkInterval)
+    {
       ledState.lastChangeTime = currentTime;
-      if (strip.getPixelColor(0) == 0) {
+      if (strip.getPixelColor(0) == 0)
+      {
         strip.setPixelColor(0, ledState.color);
-      } else {
+      }
+      else
+      {
         strip.setPixelColor(0, 0);
       }
       strip.show();
     }
-  } else if (ledState.isOn && !ledState.isBlinking) {
+  }
+  else if (ledState.isOn && !ledState.isBlinking)
+  {
     strip.setPixelColor(0, ledState.color);
     strip.show();
   }
@@ -461,9 +485,6 @@ void setup()
   Serial.begin(115200);
   Serial.println("Booting");
 
-  strip.begin();
-  strip.show(); // 初始化灯珠状态
-
   connectToWiFi();
 
   syncTime(); // X.509 validation requires synchronization time
@@ -482,6 +503,10 @@ void setup()
   // 启动任务
   t1.enable();
 
+  strip.begin();
+  strip.show(); // 初始化灯珠状态
+
+  pinMode(BUZZER_PIN, OUTPUT);
   setLED(true, 500, strip.Color(0, 0, 255), false, 0);
 }
 
@@ -495,7 +520,7 @@ void loop()
   mqtt_client.loop();
   runner.execute();
   handleLED();
-
+  rtttl::play();
 #if EN_OTA
   ArduinoOTA.handle();
 #endif
