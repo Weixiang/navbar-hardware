@@ -27,6 +27,17 @@
 #include <WiFiManager.h>
 #endif
 
+// ============================== 任务调度器 ==============================
+
+#include <TaskScheduler.h>
+
+// 创建一个调度器对象
+Scheduler runner;
+
+// 定义任务
+void pingTask();
+Task t1(60 * 1000, TASK_FOREVER, &pingTask); // 每隔60000毫秒(1分钟)执行一次，永久运行
+
 // ============================== 常量 ==============================
 
 const String rootTopic = "nav1044";
@@ -326,8 +337,17 @@ void publishMQTT(const char *topic, const char *message)
   char encoded_message[128];
   encode_base64((const u8 *)buffer, strlen(buffer), (u8 *)encoded_message);
   mqtt_client.publish(topic, encoded_message);
+  Serial.print("MQTT send on [");
+  Serial.print(topic);
+  Serial.print("]: ");
+  Serial.println(encoded_message);
 #else
   mqtt_client.publish(topic, buffer);
+  Serial.print("MQTT send on [");
+  Serial.print(topic);
+  Serial.print("]: ");
+  Serial.println(buffer);
+
 #endif
 }
 
@@ -437,15 +457,10 @@ void startBlinking(bool enable, uint32_t color, unsigned long interval, unsigned
 
 // ============================== 心跳包 ==============================
 
-void handlePing()
+void pingTask()
 {
-  unsigned long currentMillis = millis();
-  if (currentMillis - previousPingMillis >= intervalPing)
-  {
-    previousPingMillis = currentMillis;
-    publishMQTT(topicPing.c_str(), "{\"msg\":\"ping\"}");
-    startBlinking(true, strip.Color(255, 0, 0), 200, 400);
-  }
+  publishMQTT(topicPing.c_str(), "{\"msg\":\"ping\"}");
+  startBlinking(true, strip.Color(255, 0, 0), 200, 200);
 }
 
 // ============================== 主函数 ==============================
@@ -472,6 +487,12 @@ void setup()
   otaSetup();
 #endif
 
+  // 将任务添加到调度器
+  runner.addTask(t1);
+
+  // 启动任务
+  t1.enable();
+
   startBlinking(true, strip.Color(0, 255, 0), 200, 3000);
 }
 
@@ -484,7 +505,8 @@ void loop()
   }
   mqtt_client.loop();
   handleBlinking();
-  handlePing();
+  runner.execute();
+
 #if EN_OTA
   ArduinoOTA.handle();
 #endif
