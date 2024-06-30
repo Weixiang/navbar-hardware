@@ -27,6 +27,8 @@
 #include <WiFiManager.h>
 #endif
 
+// ============================== 常量 ==============================
+
 const String rootTopic = "nav1044";
 
 #if !WiFiMAN
@@ -46,26 +48,6 @@ const char *mqtt_topic = "nav1044/esp8266"; // MQTT topic
 const char *ntp_server = "ntp.aliyun.com"; // Default NTP server
 const long gmt_offset_sec = 8 * 3600;      // GMT offset in seconds (adjust for your time zone)
 const int daylight_offset_sec = 0;         // Daylight saving time offset in seconds
-
-// WiFi和MQTT客户端初始化
-BearSSL::WiFiClientSecure espClient;
-PubSubClient mqtt_client(espClient);
-
-Adafruit_NeoPixel strip(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
-
-// 闪烁相关变量
-bool isBlinking = false;
-uint32_t blinkColor = strip.Color(255, 0, 0); // 默认红色
-unsigned long blinkInterval = 500;            // 默认500ms
-unsigned long blinkDuration = 5000;           // 默认5秒
-unsigned long previousLedMillis = 0;
-unsigned long blinkStartMillis = 0;
-bool ledState = false;
-
-// 心跳包
-unsigned long previousPingMillis = 0;
-const long intervalPing = 60000; // 1分钟
-
 
 // MQTT 代理的 SSL 证书
 // Load DigiCert Global Root G2, which is used by EMQX Public Broker: broker.emqx.io
@@ -94,7 +76,31 @@ MrY=
 -----END CERTIFICATE-----
 )EOF";
 
-// 函数声明
+// ============================== 组件初始化 ==============================
+
+// WiFi和MQTT客户端初始化
+BearSSL::WiFiClientSecure espClient;
+PubSubClient mqtt_client(espClient);
+
+Adafruit_NeoPixel strip(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
+
+// ============================== 任务变量 ==============================
+
+// 闪烁相关变量
+bool isBlinking = false;
+uint32_t blinkColor = strip.Color(255, 0, 0); // 默认红色
+unsigned long blinkInterval = 500;            // 默认500ms
+unsigned long blinkDuration = 5000;           // 默认5秒
+unsigned long previousLedMillis = 0;
+unsigned long blinkStartMillis = 0;
+bool ledState = false;
+
+// 心跳包
+unsigned long previousPingMillis = 0;
+const long intervalPing = 60000; // 1分钟
+
+// ============================== 函数声明 ==============================
+
 void connectToWiFi();
 void connectToMQTT();
 void syncTime();
@@ -106,6 +112,7 @@ void otaSetup();
 void handleBlinking();
 void startBlinking(bool enable, uint32_t color, unsigned long interval, unsigned long duration);
 void handlePing();
+void autoConfig();
 
 const String topicLed = rootTopic + "/led/" + getSN();
 const String topicBeep = rootTopic + "/beep/" + getSN();
@@ -113,7 +120,8 @@ const String topicCall = rootTopic + "/call/" + getSN();
 const String topicConfig = rootTopic + "/config/" + getSN();
 const String topicPing = rootTopic + "/ping/" + getSN();
 
-// 联网
+// ============================== 联网 ==============================
+
 void connectToWiFi()
 {
 #if WiFiMAN
@@ -146,6 +154,8 @@ void connectToWiFi()
   Serial.print("  SN: ");
   Serial.println(getSN());
 }
+
+// ============================== 时间 ==============================
 
 // 同步时间
 void syncTime()
@@ -188,12 +198,16 @@ String get8601Time()
   return formattedTime;
 }
 
+// ============================== 获取ID ==============================
+
 String getSN()
 {
   String macAddress = WiFi.macAddress();
   macAddress.replace(":", "");
   return macAddress;
 }
+
+// ============================== MQTT ==============================
 
 // 连接到服务器
 void connectToMQTT()
@@ -216,32 +230,7 @@ void connectToMQTT()
       mqtt_client.subscribe(topicBeep.c_str());
       mqtt_client.subscribe(topicCall.c_str());
 
-      JsonDocument doc;
-      char buffer[256]; // 确保足够大以容纳序列化后的 JSON 数据
-
-      // 使用 String 对象存储 WiFi 相关信息，以确保数据有效性
-      String ipStr = WiFi.localIP().toString();
-      String macStr = WiFi.macAddress();
-
-      // 设置 JSON 文档的字段
-      doc["name"] = client_id;
-      doc["sn"] = getSN();
-      doc["ip"] = ipStr.c_str();
-      doc["mac"] = macStr.c_str();
-      // 进行 JSON 序列化
-      serializeJson(doc, buffer);
-      // 发布 MQTT 消息
-      publishMQTT(topicConfig.c_str(), buffer);
-    }
-    else
-    {
-      char err_buf[128];
-      espClient.getLastSSLError(err_buf, sizeof(err_buf));
-      Serial.print("Failed to connect to MQTT broker, rc=");
-      Serial.println(mqtt_client.state());
-      Serial.print("SSL error: ");
-      Serial.println(err_buf);
-      delay(5000);
+      autoConfig();
     }
   }
 }
@@ -342,6 +331,8 @@ void publishMQTT(const char *topic, const char *message)
 #endif
 }
 
+// ============================== OTA ==============================
+
 #if EN_OTA
 void otaSetup()
 {
@@ -362,6 +353,32 @@ void otaSetup()
   ArduinoOTA.begin();
 }
 #endif
+
+// ============================== 自动配置 ==============================
+
+void autoConfig()
+{
+  JsonDocument doc;
+  char buffer[256]; // 确保足够大以容纳序列化后的 JSON 数据
+
+  // 使用 String 对象存储 WiFi 相关信息，以确保数据有效性
+  String client_id = "ESP-" + getSN();
+  String ipStr = WiFi.localIP().toString();
+  String macStr = WiFi.macAddress();
+
+  // 设置 JSON 文档的字段
+  doc["name"] = client_id;
+  doc["sn"] = getSN();
+  doc["ip"] = ipStr.c_str();
+  doc["mac"] = macStr.c_str();
+  // 进行 JSON 序列化
+  serializeJson(doc, buffer);
+  // 发布 MQTT 消息
+  publishMQTT(topicConfig.c_str(), buffer);
+  Serial.println("Auto config completed.");
+}
+
+// ============================== LED控制 ==============================
 
 // 非阻塞的闪烁控制函数
 void handleBlinking()
@@ -418,11 +435,29 @@ void startBlinking(bool enable, uint32_t color, unsigned long interval, unsigned
   }
 }
 
+// ============================== 心跳包 ==============================
+
+void handlePing()
+{
+  unsigned long currentMillis = millis();
+  if (currentMillis - previousPingMillis >= intervalPing)
+  {
+    previousPingMillis = currentMillis;
+    publishMQTT(topicPing.c_str(), "{\"msg\":\"ping\"}");
+    startBlinking(true, strip.Color(255, 0, 0), 200, 400);
+  }
+}
+
+// ============================== 主函数 ==============================
+
 void setup()
 {
   // put your setup code here, to run once:
   Serial.begin(115200);
   Serial.println("Booting");
+
+  strip.begin();
+  strip.show(); // 初始化灯珠状态
 
   connectToWiFi();
 
@@ -433,23 +468,11 @@ void setup()
   mqtt_client.setCallback(mqttCallback);
   connectToMQTT();
 
-  strip.begin();
-  strip.show(); // 初始化灯珠状态
-
 #if EN_OTA
   otaSetup();
 #endif
 
   startBlinking(true, strip.Color(0, 255, 0), 200, 3000);
-}
-
-void handlePing(){
-  unsigned long currentMillis = millis();
-  if (currentMillis - previousPingMillis >= intervalPing) {
-    previousPingMillis = currentMillis;
-    publishMQTT(topicPing.c_str(),"{\"msg\":\"ping\"}");
-    startBlinking(true, strip.Color(255, 0, 0), 200, 400);
-  }
 }
 
 void loop()
